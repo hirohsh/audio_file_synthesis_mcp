@@ -103,7 +103,7 @@ src/
 
 ## 7. 依存クレート（実装）
 - MCP 通信: `serde`, `serde_json`（stdio JSON-RPC を自前実装）
-- MP3 デコード: `minimp3`
+- MP3 デコード: `symphonia`（`mp3` feature）
 - FLAC デコード: `claxon`
 - M4A デコード: `symphonia`（`isomp4` + `aac` + `alac`）
 - WAV デコード/エンコード: プロジェクト内実装（WAV extensible を含む）
