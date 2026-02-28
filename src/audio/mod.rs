@@ -5,12 +5,16 @@ pub mod mix;
 pub mod normalize;
 pub mod resample;
 
+use std::path::Component;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use mix::MixTrack;
+
+const MAX_SAMPLE_RATE: u32 = 192_000;
+const MAX_START_MS: u64 = 3_600_000;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct InputAudio {
@@ -26,6 +30,12 @@ pub struct NormalizationOptions {
     pub enabled: bool,
     #[serde(default = "default_peak_dbfs")]
     pub peak_dbfs: f32,
+}
+
+fn is_safe_path(path: &std::path::Path) -> bool {
+    !path
+        .components()
+        .any(|comp| matches!(comp, Component::ParentDir))
 }
 
 fn default_normalization_enabled() -> bool {
@@ -68,11 +78,20 @@ pub fn synthesize_mono_audio(request: &SynthesizeRequest) -> Result<SynthesizeRe
             "`inputs` must contain at least one audio file".to_string(),
         ));
     }
-    if request.target_sample_rate == 0 {
+
+    if request.target_sample_rate == 0 || request.target_sample_rate > MAX_SAMPLE_RATE {
+        return Err(AppError::InvalidParams(format!(
+            "`target_sample_rate` must be between 1 and {}",
+            MAX_SAMPLE_RATE
+        )));
+    }
+
+    if !is_safe_path(&request.output_path) {
         return Err(AppError::InvalidParams(
-            "`target_sample_rate` must be greater than zero".to_string(),
+            "`output_path` must not contain parent directory components".to_string(),
         ));
     }
+
     if request.normalization.enabled
         && (!request.normalization.peak_dbfs.is_finite() || request.normalization.peak_dbfs > 0.0)
     {
@@ -83,6 +102,21 @@ pub fn synthesize_mono_audio(request: &SynthesizeRequest) -> Result<SynthesizeRe
 
     let mut prepared_tracks: Vec<(Vec<f32>, u64, f32)> = Vec::with_capacity(request.inputs.len());
     for input in &request.inputs {
+        if input.start_ms > MAX_START_MS {
+            return Err(AppError::InvalidParams(format!(
+                "start_ms for {} exceeds maximum of {} ms",
+                input.path.display(),
+                MAX_START_MS
+            )));
+        }
+
+        if !is_safe_path(&input.path) {
+            return Err(AppError::InvalidParams(format!(
+                "input path must not contain parent directory components: {}",
+                input.path.display()
+            )));
+        }
+
         if !input.path.exists() {
             return Err(AppError::InvalidParams(format!(
                 "input file does not exist: {}",

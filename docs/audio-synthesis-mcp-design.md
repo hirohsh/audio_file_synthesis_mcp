@@ -2,7 +2,8 @@
 
 ## 1. 目的
 - 複数話者の独立した音声ファイルを入力として受け取り、1つのモノラル音声ファイルを出力する Rust 製 MCP サーバーを提供する。
-- 初版では **WAV / MP3 / FLAC** を入力対応フォーマットとする。
+- 初版では **WAV / MP3 / FLAC / M4A** を入力対応フォーマットとする。
+- WAV は PCM / IEEE float に加えて、`WAVE_FORMAT_EXTENSIBLE`（SubFormat: PCM / IEEE_FLOAT）を受け付ける。
 
 ## 2. スコープ
 ### 2.1 対象
@@ -62,7 +63,7 @@
    - `inputs` が空でないことを確認
    - パス存在確認、読み取り可否確認、拡張子と実デコード可否を確認
 2. **デコード**
-   - WAV / MP3 / FLAC を `f32` PCM に変換
+   - WAV（PCM / IEEE float / WAV extensible）/ MP3 / FLAC / M4A を `f32` PCM に変換
 3. **チャンネル統合（モノラル化）**
    - 複数チャンネル入力は平均化して 1ch 化
 4. **リサンプル**
@@ -104,7 +105,8 @@ src/
 - MCP 通信: `serde`, `serde_json`（stdio JSON-RPC を自前実装）
 - MP3 デコード: `minimp3`
 - FLAC デコード: `claxon`
-- WAV デコード/エンコード: プロジェクト内実装
+- M4A デコード: `symphonia`（`isomp4` + `aac` + `alac`）
+- WAV デコード/エンコード: プロジェクト内実装（WAV extensible を含む）
 - エラー: プロジェクト内 `AppError`
 
 ## 8. テスト方針
@@ -115,7 +117,7 @@ src/
 - 正規化: 目標ピークに収束しクリップしないこと
 
 ### 8.2 統合テスト
-- WAV / MP3 / FLAC 混在入力で単一モノラル WAV が生成されること
+- WAV（extensible 含む）/ MP3 / FLAC / M4A 混在入力で単一モノラル WAV が生成されること
 - 空入力、壊れたファイル、書き込み不可パスで適切なエラーを返すこと
 
 ## 9. 今後の実装ステップ
