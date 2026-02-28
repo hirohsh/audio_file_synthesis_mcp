@@ -2,7 +2,6 @@ use std::fs::{self, File};
 use std::path::Path;
 
 use claxon::FlacReader;
-use minimp3::{Decoder as Mp3Decoder, Error as Mp3Error};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -69,86 +68,23 @@ pub fn decode_audio(path: &Path) -> Result<DecodedAudio, AppError> {
 }
 
 fn decode_mp3(path: &Path) -> Result<DecodedAudio, AppError> {
-    let file = File::open(path).map_err(|source| AppError::io_with_path(path, source))?;
-    let mut decoder = Mp3Decoder::new(file);
-
-    let mut sample_rate: Option<u32> = None;
-    let mut channels: Option<u16> = None;
-    let mut samples: Vec<f32> = Vec::new();
-
-    loop {
-        match decoder.next_frame() {
-            Ok(frame) => {
-                if frame.sample_rate <= 0 || frame.channels == 0 {
-                    return Err(AppError::Decode(format!(
-                        "MP3 '{}' had invalid frame metadata",
-                        path.display()
-                    )));
-                }
-
-                let frame_rate = frame.sample_rate as u32;
-                let frame_channels = u16::try_from(frame.channels).map_err(|_| {
-                    AppError::Decode(format!(
-                        "MP3 '{}' has too many channels ({})",
-                        path.display(),
-                        frame.channels
-                    ))
-                })?;
-
-                if let Some(rate) = sample_rate {
-                    if rate != frame_rate {
-                        return Err(AppError::Decode(format!(
-                            "MP3 '{}' uses varying sample rates",
-                            path.display()
-                        )));
-                    }
-                } else {
-                    sample_rate = Some(frame_rate);
-                }
-
-                if let Some(channel_count) = channels {
-                    if channel_count != frame_channels {
-                        return Err(AppError::Decode(format!(
-                            "MP3 '{}' uses varying channel counts",
-                            path.display()
-                        )));
-                    }
-                } else {
-                    channels = Some(frame_channels);
-                }
-
-                samples.extend(frame.data.into_iter().map(|sample| sample as f32 / 32768.0));
-            }
-            Err(Mp3Error::Eof) => break,
-            Err(error) => {
-                return Err(AppError::Decode(format!(
-                    "failed to decode MP3 '{}': {error}",
-                    path.display()
-                )));
-            }
-        }
-    }
-
-    if samples.is_empty() {
-        return Err(AppError::Decode(format!(
-            "MP3 '{}' contained no decodable frames",
-            path.display()
-        )));
-    }
-
-    Ok(DecodedAudio {
-        samples,
-        channels: channels.expect("channels set when samples are present"),
-        sample_rate: sample_rate.expect("sample_rate set when samples are present"),
-    })
+    decode_with_symphonia(path, "mp3", "MP3")
 }
 
 fn decode_m4a(path: &Path) -> Result<DecodedAudio, AppError> {
+    decode_with_symphonia(path, "m4a", "M4A")
+}
+
+fn decode_with_symphonia(
+    path: &Path,
+    hint_extension: &str,
+    label: &str,
+) -> Result<DecodedAudio, AppError> {
     let file = File::open(path).map_err(|source| AppError::io_with_path(path, source))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = Hint::new();
-    hint.with_extension("m4a");
+    hint.with_extension(hint_extension);
 
     let probed = get_probe()
         .format(
@@ -157,13 +93,15 @@ fn decode_m4a(path: &Path) -> Result<DecodedAudio, AppError> {
             &FormatOptions::default(),
             &MetadataOptions::default(),
         )
-        .map_err(|error| AppError::Decode(format!("failed to open M4A '{}': {error}", path.display())))?;
+        .map_err(|error| {
+            AppError::Decode(format!("failed to open {label} '{}': {error}", path.display()))
+        })?;
     let mut format = probed.format;
 
     let (track_id, codec_params) = {
         let track = format
             .default_track()
-            .ok_or_else(|| AppError::Decode(format!("M4A '{}' has no default track", path.display())))?;
+            .ok_or_else(|| AppError::Decode(format!("{label} '{}' has no default track", path.display())))?;
         (track.id, track.codec_params.clone())
     };
 
@@ -176,7 +114,7 @@ fn decode_m4a(path: &Path) -> Result<DecodedAudio, AppError> {
         .make(&codec_params, &DecoderOptions::default())
         .map_err(|error| {
             AppError::Decode(format!(
-                "failed to initialize M4A decoder '{}': {error}",
+                "failed to initialize {label} decoder '{}': {error}",
                 path.display()
             ))
         })?;
@@ -192,7 +130,7 @@ fn decode_m4a(path: &Path) -> Result<DecodedAudio, AppError> {
             }
             Err(error) => {
                 return Err(AppError::Decode(format!(
-                    "failed to read M4A packet from '{}': {error}",
+                    "failed to read {label} packet from '{}': {error}",
                     path.display()
                 )));
             }
@@ -204,7 +142,7 @@ fn decode_m4a(path: &Path) -> Result<DecodedAudio, AppError> {
 
         let decoded = decoder.decode(&packet).map_err(|error| {
             AppError::Decode(format!(
-                "failed to decode M4A packet from '{}': {error}",
+                "failed to decode {label} packet from '{}': {error}",
                 path.display()
             ))
         })?;
@@ -212,14 +150,14 @@ fn decode_m4a(path: &Path) -> Result<DecodedAudio, AppError> {
         let spec = *decoded.spec();
         let packet_channels = u16::try_from(spec.channels.count()).map_err(|_| {
             AppError::Decode(format!(
-                "M4A '{}' has too many channels ({})",
+                "{label} '{}' has too many channels ({})",
                 path.display(),
                 spec.channels.count()
             ))
         })?;
         if packet_channels == 0 || spec.rate == 0 {
             return Err(AppError::Decode(format!(
-                "M4A '{}' had invalid frame metadata",
+                "{label} '{}' had invalid frame metadata",
                 path.display()
             )));
         }
@@ -227,7 +165,7 @@ fn decode_m4a(path: &Path) -> Result<DecodedAudio, AppError> {
         if let Some(rate) = sample_rate {
             if spec.rate != rate {
                 return Err(AppError::Decode(format!(
-                    "M4A '{}' uses varying sample rates",
+                    "{label} '{}' uses varying sample rates",
                     path.display()
                 )));
             }
@@ -238,7 +176,7 @@ fn decode_m4a(path: &Path) -> Result<DecodedAudio, AppError> {
         if let Some(channel_count) = channels {
             if packet_channels != channel_count {
                 return Err(AppError::Decode(format!(
-                    "M4A '{}' uses varying channel counts",
+                    "{label} '{}' uses varying channel counts",
                     path.display()
                 )));
             }
@@ -253,25 +191,25 @@ fn decode_m4a(path: &Path) -> Result<DecodedAudio, AppError> {
 
     if samples.is_empty() {
         return Err(AppError::Decode(format!(
-            "M4A '{}' contained no decodable frames",
+            "{label} '{}' contained no decodable frames",
             path.display()
         )));
     }
     let channels = channels.ok_or_else(|| {
         AppError::Decode(format!(
-            "M4A '{}' is missing channel metadata",
+            "{label} '{}' is missing channel metadata",
             path.display()
         ))
     })?;
     let sample_rate = sample_rate.ok_or_else(|| {
         AppError::Decode(format!(
-            "M4A '{}' is missing sample rate metadata",
+            "{label} '{}' is missing sample rate metadata",
             path.display()
         ))
     })?;
     if samples.len() % channels as usize != 0 {
         return Err(AppError::Decode(format!(
-            "M4A '{}' sample count is not divisible by channels",
+            "{label} '{}' sample count is not divisible by channels",
             path.display()
         )));
     }

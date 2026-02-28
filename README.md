@@ -8,7 +8,7 @@ stdio 上で JSON-RPC 2.0 を受け付け、`synthesize_mono_audio` ツールを
 ### 入力
 - WAV（PCM / IEEE float）
 - WAV (`WAVE_FORMAT_EXTENSIBLE` の SubFormat: PCM / IEEE_FLOAT)
-- MP3
+- MP3（Symphonia ベース）
 - FLAC
 - M4A（主に AAC / ALAC）
 
