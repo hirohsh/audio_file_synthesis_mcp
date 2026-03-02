@@ -25,6 +25,8 @@ pub struct SynthesizeMonoAudioRequest {
     pub target_sample_rate: u32,
     #[serde(default)]
     pub normalization: NormalizationOptions,
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 fn default_target_sample_rate() -> u32 {
@@ -40,20 +42,22 @@ pub struct SynthesizeMonoAudioResponse {
     pub peak_dbfs: f32,
 }
 
-#[derive(Default)]
-pub struct McpServer;
+pub struct McpServer {
+    pub work_dir: PathBuf,
+}
 
 impl McpServer {
     pub fn call_synthesize_mono_audio(
         &self,
         request: SynthesizeMonoAudioRequest,
     ) -> Result<SynthesizeMonoAudioResponse, AppError> {
-        synthesize_mono_audio(request)
+        synthesize_mono_audio(request, &self.work_dir)
     }
 }
 
 pub fn synthesize_mono_audio(
     request: SynthesizeMonoAudioRequest,
+    work_dir: &std::path::Path,
 ) -> Result<SynthesizeMonoAudioResponse, AppError> {
     let request = SynthesizeRequest {
         inputs: request
@@ -69,9 +73,10 @@ pub fn synthesize_mono_audio(
         output_path: request.output_path,
         target_sample_rate: request.target_sample_rate,
         normalization: request.normalization,
+        overwrite: request.overwrite,
     };
 
-    let result: SynthesizeResult = audio::synthesize_mono_audio(&request)?;
+    let result: SynthesizeResult = audio::synthesize_mono_audio(&request, work_dir)?;
     Ok(SynthesizeMonoAudioResponse {
         output_path: result.output_path,
         sample_rate: result.sample_rate,
@@ -130,9 +135,10 @@ mod tests {
                 enabled: false,
                 peak_dbfs: -1.0,
             },
+            overwrite: false,
         };
 
-        let server = McpServer;
+        let server = McpServer { work_dir: temp_dir.clone() };
         let response = server
             .call_synthesize_mono_audio(request)
             .expect("tool call must succeed");

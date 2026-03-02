@@ -5,8 +5,7 @@ pub mod mix;
 pub mod normalize;
 pub mod resample;
 
-use std::path::Component;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +14,8 @@ use mix::MixTrack;
 
 const MAX_SAMPLE_RATE: u32 = 192_000;
 const MAX_START_MS: u64 = 3_600_000;
+/// Maximum combined size of all input files (200 MB).
+const MAX_TOTAL_FILE_SIZE: u64 = 200 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct InputAudio {
@@ -32,10 +33,42 @@ pub struct NormalizationOptions {
     pub peak_dbfs: f32,
 }
 
-fn is_safe_path(path: &std::path::Path) -> bool {
-    !path
-        .components()
-        .any(|comp| matches!(comp, Component::ParentDir))
+/// Resolve `path` relative to `base` (if relative) and normalize away `.` / `..` components
+/// without calling `canonicalize` (which requires the path to already exist).
+fn normalize_path(base: &Path, path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+
+    let mut result = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::ParentDir => {
+                result.pop();
+            }
+            Component::CurDir => {}
+            c => result.push(c),
+        }
+    }
+    result
+}
+
+/// Return `Err` if `path` (resolved relative to `base`) falls outside `base`.
+fn validate_path_within_work_dir(
+    path: &Path,
+    work_dir: &Path,
+    label: &str,
+) -> Result<PathBuf, AppError> {
+    let resolved = normalize_path(work_dir, path);
+    if !resolved.starts_with(work_dir) {
+        return Err(AppError::InvalidParams(format!(
+            "{label} must be located inside the working directory: {}",
+            path.display()
+        )));
+    }
+    Ok(resolved)
 }
 
 fn default_normalization_enabled() -> bool {
@@ -61,6 +94,7 @@ pub struct SynthesizeRequest {
     pub output_path: PathBuf,
     pub target_sample_rate: u32,
     pub normalization: NormalizationOptions,
+    pub overwrite: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -72,7 +106,10 @@ pub struct SynthesizeResult {
     pub peak_dbfs: f32,
 }
 
-pub fn synthesize_mono_audio(request: &SynthesizeRequest) -> Result<SynthesizeResult, AppError> {
+pub fn synthesize_mono_audio(
+    request: &SynthesizeRequest,
+    work_dir: &Path,
+) -> Result<SynthesizeResult, AppError> {
     if request.inputs.is_empty() {
         return Err(AppError::InvalidParams(
             "`inputs` must contain at least one audio file".to_string(),
@@ -86,10 +123,14 @@ pub fn synthesize_mono_audio(request: &SynthesizeRequest) -> Result<SynthesizeRe
         )));
     }
 
-    if !is_safe_path(&request.output_path) {
-        return Err(AppError::InvalidParams(
-            "`output_path` must not contain parent directory components".to_string(),
-        ));
+    let resolved_output =
+        validate_path_within_work_dir(&request.output_path, work_dir, "`output_path`")?;
+
+    if !request.overwrite && resolved_output.exists() {
+        return Err(AppError::InvalidParams(format!(
+            "`output_path` already exists and overwrite is disabled: {}",
+            resolved_output.display()
+        )));
     }
 
     if request.normalization.enabled
@@ -100,7 +141,8 @@ pub fn synthesize_mono_audio(request: &SynthesizeRequest) -> Result<SynthesizeRe
         ));
     }
 
-    let mut prepared_tracks: Vec<(Vec<f32>, u64, f32)> = Vec::with_capacity(request.inputs.len());
+    // Validate all input paths and accumulate total file size before decoding.
+    let mut total_input_size: u64 = 0;
     for input in &request.inputs {
         if input.start_ms > MAX_START_MS {
             return Err(AppError::InvalidParams(format!(
@@ -110,12 +152,7 @@ pub fn synthesize_mono_audio(request: &SynthesizeRequest) -> Result<SynthesizeRe
             )));
         }
 
-        if !is_safe_path(&input.path) {
-            return Err(AppError::InvalidParams(format!(
-                "input path must not contain parent directory components: {}",
-                input.path.display()
-            )));
-        }
+        validate_path_within_work_dir(&input.path, work_dir, "input path")?;
 
         if !input.path.exists() {
             return Err(AppError::InvalidParams(format!(
@@ -124,6 +161,20 @@ pub fn synthesize_mono_audio(request: &SynthesizeRequest) -> Result<SynthesizeRe
             )));
         }
 
+        let file_size = std::fs::metadata(&input.path)
+            .map_err(|source| AppError::io_with_path(&input.path, source))?
+            .len();
+        total_input_size = total_input_size.saturating_add(file_size);
+        if total_input_size > MAX_TOTAL_FILE_SIZE {
+            return Err(AppError::InvalidParams(format!(
+                "combined input file size exceeds the maximum of {} bytes",
+                MAX_TOTAL_FILE_SIZE
+            )));
+        }
+    }
+
+    let mut prepared_tracks: Vec<(Vec<f32>, u64, f32)> = Vec::with_capacity(request.inputs.len());
+    for input in &request.inputs {
         let decoded = decode::decode_audio(&input.path)?;
         let mono = downmix::downmix_to_mono(&decoded.samples, decoded.channels)?;
         let resampled =
@@ -146,13 +197,13 @@ pub fn synthesize_mono_audio(request: &SynthesizeRequest) -> Result<SynthesizeRe
     }
 
     let peak_dbfs = normalize::peak_dbfs(&mixed);
-    encode::write_wav_mono_i16(&request.output_path, request.target_sample_rate, &mixed)?;
+    encode::write_wav_mono_i16(&resolved_output, request.target_sample_rate, &mixed)?;
 
     let duration_ms =
         ((mixed.len() as u128 * 1_000_u128) / request.target_sample_rate as u128) as u64;
 
     Ok(SynthesizeResult {
-        output_path: request.output_path.clone(),
+        output_path: resolved_output,
         sample_rate: request.target_sample_rate,
         channels: 1,
         duration_ms,
@@ -272,9 +323,10 @@ mod tests {
                 enabled: false,
                 peak_dbfs: -1.0,
             },
+            overwrite: false,
         };
 
-        let result = synthesize_mono_audio(&request).expect("synthesis must succeed");
+        let result = synthesize_mono_audio(&request, &temp_dir).expect("synthesis must succeed");
         assert_eq!(result.channels, 1);
         assert_eq!(result.sample_rate, 1_000);
         assert_eq!(result.duration_ms, 200);

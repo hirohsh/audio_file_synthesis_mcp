@@ -13,7 +13,7 @@ use symphonia::default::{get_codecs, get_probe};
 
 use crate::error::AppError;
 
-const MAX_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB
+const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
 const WAVE_FORMAT_PCM: u16 = 1;
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
