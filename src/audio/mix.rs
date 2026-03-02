@@ -1,5 +1,8 @@
 use crate::error::AppError;
 
+/// Maximum number of f32 samples in the mixed output buffer (~200 MB at 4 bytes/sample).
+const MAX_MIX_BUFFER_SAMPLES: usize = 50_000_000;
+
 #[derive(Copy, Clone, Debug)]
 pub struct MixTrack<'a> {
     pub samples: &'a [f32],
@@ -21,6 +24,13 @@ pub fn mix_tracks(tracks: &[MixTrack<'_>], sample_rate: u32) -> Result<Vec<f32>,
     for track in tracks {
         let offset = ms_to_samples(track.start_ms, sample_rate);
         total_len = total_len.max(offset + track.samples.len());
+    }
+
+    if total_len > MAX_MIX_BUFFER_SAMPLES {
+        return Err(AppError::InvalidParams(format!(
+            "mixed output would require {} samples which exceeds the maximum of {}",
+            total_len, MAX_MIX_BUFFER_SAMPLES
+        )));
     }
 
     let mut mixed = vec![0.0_f32; total_len];

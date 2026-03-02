@@ -45,12 +45,12 @@ fn default_jsonrpc_version() -> String {
     JSON_RPC_VERSION.to_string()
 }
 
-pub fn run_stdio_server() -> Result<(), AppError> {
+pub fn run_stdio_server(work_dir: std::path::PathBuf) -> Result<(), AppError> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = BufWriter::new(stdout.lock());
-    let server = McpServer;
+    let server = McpServer { work_dir };
 
     loop {
         let Some(message) = read_message(&mut reader)? else {
