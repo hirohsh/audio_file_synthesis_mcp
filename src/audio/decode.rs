@@ -302,9 +302,12 @@ fn decode_wav(path: &Path) -> Result<DecodedAudio, AppError> {
             .checked_add(chunk_size)
             .ok_or_else(|| AppError::Decode("WAV chunk size overflow".to_string()))?;
         if chunk_end > bytes.len() {
-            return Err(AppError::Decode(
-                "WAV chunk length exceeds file size".to_string(),
-            ));
+            // Chunk size exceeds the file. For data chunks, use whatever bytes are
+            // actually present; for any other chunk, stop parsing gracefully.
+            if chunk_id == b"data" {
+                data_chunk = Some((chunk_start, bytes.len()));
+            }
+            break;
         }
 
         if chunk_id == b"fmt " {
@@ -610,6 +613,63 @@ mod tests {
         let error = decode_audio(&path).expect_err("decode should fail");
         assert!(matches!(error, AppError::UnsupportedFormat(_)));
         assert!(error.to_string().contains("WAV extensible subformat"));
+
+        fs::remove_dir_all(&temp_dir).expect("cleanup temp dir");
+    }
+
+    /// Builds a minimal PCM WAV (fmt + data) where the data chunk size header is inflated by
+    /// `oversize_by` bytes. Common in streaming encoders and some TTS tools.
+    fn wav_pcm_i16_with_oversized_data_chunk(
+        sample_rate: u32,
+        channels: u16,
+        samples: &[i16],
+        oversize_by: u32,
+    ) -> Vec<u8> {
+        let data_size = (samples.len() * std::mem::size_of::<i16>()) as u32;
+        let claimed_data_size = data_size + oversize_by;
+        let block_align = channels * std::mem::size_of::<i16>() as u16;
+        let byte_rate = sample_rate * block_align as u32;
+        let riff_size = 4 + (8 + 16) + (8 + data_size); // riff uses real size
+
+        let mut bytes = Vec::with_capacity((riff_size + 8) as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&riff_size.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&WAVE_FORMAT_PCM.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&claimed_data_size.to_le_bytes()); // inflated size
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        bytes
+    }
+
+    #[test]
+    fn wav_pcm_16_with_oversized_data_chunk_decodes_gracefully() {
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let path = temp_dir.join("oversized_data.wav");
+
+        // Simulate a WAV produced by a TTS tool or streaming encoder where the data
+        // chunk size header is 1 byte larger than the actual audio data (off-by-one).
+        let samples: Vec<i16> = (0..4).map(|i| (i * 8192) as i16).collect();
+        let wav_bytes = wav_pcm_i16_with_oversized_data_chunk(44_100, 1, &samples, 1);
+        fs::write(&path, wav_bytes).expect("write file");
+
+        let decoded = decode_audio(&path).expect("decode should succeed despite oversized chunk");
+        assert_eq!(decoded.channels, 1);
+        assert_eq!(decoded.sample_rate, 44_100);
+        assert_eq!(decoded.samples.len(), 4);
 
         fs::remove_dir_all(&temp_dir).expect("cleanup temp dir");
     }
